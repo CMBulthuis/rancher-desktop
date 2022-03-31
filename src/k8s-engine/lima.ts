@@ -97,7 +97,7 @@ type LimaConfiguration = {
     hosts?: Record<string, string>;
   }
   portForwards?: Array<Record<string, any>>;
-  networks?: Array<Record<string, string>>;
+  networks?: Array<Record<string, any>>;
   paths?: Record<string, string>;
 
   // The rest of the keys are not used by lima, just state we keep with the VM.
@@ -576,9 +576,19 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
       });
 
       // Always add a shared network interface in case the bridged interface doesn't get an IP address.
-      config.networks = [{ vnl: `vde://${ RUN_LIMA_LOCATION }/rancher_desktop_shared.ctl` }];
+      config.networks = [{
+        vnl:        `vde://${ RUN_LIMA_LOCATION }/rancher-desktop-shared.ctl`,
+        switchPort: 1,
+        macAddress: '',
+        interface:  'rd1',
+      }];
       if (hostNetwork) {
-        config.networks.push({ vnl: `vde://${ RUN_LIMA_LOCATION }/rancher_desktop_bridged_${ hostNetwork.interface }.ctl` });
+        config.networks.push({
+          vnl:        `vde://${ RUN_LIMA_LOCATION }/rancher-desktop-bridged_${ hostNetwork.interface }.ctl`,
+          switchPort: 1,
+          macAddress: '',
+          interface:  'rd0',
+        });
       } else {
         console.log('Could not find any acceptable host networks for bridging.');
       }
@@ -963,26 +973,28 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
     const modeInterface = (mode === 'shared') ? mode : `${ mode }_${ networkInterface }`;
     const vmnetArguments = (mode === 'shared') ? [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone', `--vmnet-mode=${ mode }`,
       '--vmnet-gateway=192.168.205.1', '--vmnet-dhcp-end=192.168.205.254', '--vmnet-mask=255.255.255.0',
-      `${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }.ctl`] : [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone', `--vmnet-mode=${ mode }`,
-      `--vmnet-interface=${ networkInterface }`, `${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }.ctl`];
+      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`] : [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone', `--vmnet-mode=${ mode }`,
+      `--vmnet-interface=${ networkInterface }`, `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`];
 
     const vdeSwitchObjNew = {
       Label:             `io.github.rancher-desktop.${ modeInterface }_switch`,
-      ProgramArguments:  [`${ VDE_DIR }/bin/vde_switch`, '--pidfile', `${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }_switch.pid`,
-        '--sock', `${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }.ctl`, '--group', 'everyone', '--dirmode', '0777', '--nostdin'],
-      // StandardErrorPath: `${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }_switch.stderr`,
-      // StandardOutPath:   `${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }_switch.stdout`,
+      ProgramArguments:  [`${ VDE_DIR }/bin/vde_switch`, `--pidfile=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_switch.pid`,
+        `--sock=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`, '--group=everyone', '--dirmode=0777', '--nostdin'],
+      // StandardErrorPath: `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_switch.stderr`,
+      // StandardOutPath:   `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_switch.stdout`,
       KeepAlive:         { PathState: { [limaPid]: true } },
-      UserName:          'root'
+      UserName:          'daemon',
+      GroupName:         'everyone'
     };
 
     const vdeVmnetObjNew = {
       Label:             `io.github.rancher-desktop.${ modeInterface }_vmnet`,
       ProgramArguments:  vmnetArguments,
-      // StandardErrorPath: `${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }_vmnet.stderr`,
-      // StandardOutPath:   `${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }_vmnet.stdout`,
-      KeepAlive:         { PathState: { [`${ RUN_LIMA_LOCATION }/rancher_desktop_${ modeInterface }_switch.pid`]: true } },
-      UserName:          'root'
+      // StandardErrorPath: `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet.stderr`,
+      // StandardOutPath:   `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet.stdout`,
+      KeepAlive:         { PathState: { [`${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_switch.pid`]: true } },
+      UserName:          'root',
+      GroupName:         'wheel'
     };
 
     const vdeSwitchFile = `${ LAUNCHD_DIR }/io.github.rancher-desktop.${ modeInterface }_switch.plist`;
@@ -1010,7 +1022,7 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
             }
           });
           commands.push(`rm -rf ${ LAUNCHD_DIR }/io.github.rancher-desktop.${ mode }*`);
-          commands.push(`rm -rf ${ RUN_LIMA_LOCATION }/rancher_desktop_${ mode }*`);
+          commands.push(`rm -rf ${ RUN_LIMA_LOCATION }/rancher-desktop-${ mode }*`);
         } else {
           commands.push(`launchctl unload ${ vdeSwitchFile }`);
           commands.push(`launchctl unload ${ vdeVmnetFile }`);
