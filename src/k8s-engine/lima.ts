@@ -769,7 +769,7 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
       this.lastCommandComment = 'Setting Lima permissions';
       await this.progressTracker.action(this.lastCommandComment, 10, async() => {
         await this.ensureRunLimaLocation(commands, explanations);
-        // await this.createLimaSudoersFile(commands, explanations, randomTag);
+        await this.createLimaSudoersFile(commands, explanations, randomTag);
         await this.installCustomLaunchdLimaNetworkConfig(commands, explanations);
       });
     }
@@ -973,8 +973,11 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
     const modeInterface = (mode === 'shared') ? mode : `${ mode }_${ networkInterface }`;
     const vmnetArguments = (mode === 'shared') ? [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone', `--vmnet-mode=${ mode }`,
       '--vmnet-gateway=192.168.205.1', '--vmnet-dhcp-end=192.168.205.254', '--vmnet-mask=255.255.255.0',
-      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`] : [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone', `--vmnet-mode=${ mode }`,
-      `--vmnet-interface=${ networkInterface }`, `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`];
+      `--pidfile=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet.pid`,
+      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`] : [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone',
+      `--vmnet-mode=${ mode }`, `--vmnet-interface=${ networkInterface }`,
+      `--pidfile=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet.pid`,
+      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`];
 
     const vdeSwitchObjNew = {
       Label:             `io.github.rancher-desktop.${ modeInterface }_switch`,
@@ -1433,12 +1436,12 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
    * @precondition The VM configuration is correct.
    */
   protected async startVM() {
-    // if (os.platform() === 'darwin') {
-    //   this.lastCommandComment = 'Installing networking requirements';
-    //   await this.progressTracker.action(this.lastCommandComment, 100, async() => {
-    //     await this.installCustomLimaNetworkConfig();
-    //   });
-    // }
+    if (os.platform() === 'darwin') {
+      this.lastCommandComment = 'Installing networking requirements';
+      await this.progressTracker.action(this.lastCommandComment, 100, async() => {
+        await this.installCustomLimaNetworkConfig();
+      });
+    }
     this.lastCommandComment = 'Asking for permission to run tasks as administrator';
     await this.progressTracker.action(this.lastCommandComment, 100, async() => {
       await this.installToolsWithSudo();
