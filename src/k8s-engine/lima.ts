@@ -973,8 +973,11 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
     const modeInterface = (mode === 'shared') ? mode : `${ mode }_${ networkInterface }`;
     const vmnetArguments = (mode === 'shared') ? [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone', `--vmnet-mode=${ mode }`,
       '--vmnet-gateway=192.168.205.1', '--vmnet-dhcp-end=192.168.205.254', '--vmnet-mask=255.255.255.0',
-      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`] : [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone', `--vmnet-mode=${ mode }`,
-      `--vmnet-interface=${ networkInterface }`, `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`];
+      `--pidfile=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet.pid`,
+      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`] : [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone',
+      `--vmnet-mode=${ mode }`, `--vmnet-interface=${ networkInterface }`,
+      `--pidfile=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet.pid`,
+      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`];
 
     const vdeSwitchObjNew = {
       Label:             `io.github.rancher-desktop.${ modeInterface }_switch`,
