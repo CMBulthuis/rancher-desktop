@@ -17,6 +17,8 @@ import sudo from 'sudo-prompt';
 import tar from 'tar-stream';
 import yaml from 'yaml';
 import Electron from 'electron';
+import plist from 'plist';
+import isEqual from 'lodash/isEqual';
 
 import K3sHelper, { ShortVersion } from './k3sHelper';
 import ProgressTracker from './progressTracker';
@@ -94,7 +96,7 @@ type LimaConfiguration = {
     hosts?: Record<string, string>;
   }
   portForwards?: Array<Record<string, any>>;
-  networks?: Array<Record<string, string>>;
+  networks?: Array<Record<string, any>>;
   paths?: Record<string, string>;
 
   // The rest of the keys are not used by lima, just state we keep with the VM.
@@ -161,6 +163,8 @@ const ALPINE_VERSION = '3.14.3';
  *  and none of them are allowed to be symlinks (lima-vm requirements).
  */
 const VDE_DIR = '/opt/rancher-desktop';
+const LAUNCHD_DIR = '/Library/LaunchDaemons';
+const RUN_LIMA_LOCATION = NETWORKS_CONFIG.paths.varRun;
 
 // Make this file the last one to be loaded by `sudoers` so others don't override needed settings.
 // Details at https://github.com/rancher-sandbox/rancher-desktop/issues/1444
@@ -593,13 +597,17 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
 
         // Always add a shared network interface in case the bridged interface doesn't get an IP address.
         config.networks = [{
-          lima:      'rancher-desktop-shared',
-          interface: 'rd1',
+          vnl:        `vde://${ RUN_LIMA_LOCATION }/rancher-desktop-shared.ctl`,
+          switchPort: 1,
+          macAddress: '',
+          interface:  'rd1',
         }];
         if (hostNetwork) {
           config.networks.push({
-            lima:      `rancher-desktop-bridged_${ hostNetwork.interface }`,
-            interface: 'rd0',
+            vnl:        `vde://${ RUN_LIMA_LOCATION }/rancher-desktop-bridged_${ hostNetwork.interface }.ctl`,
+            switchPort: 1,
+            macAddress: '',
+            interface:  'rd0',
           });
         } else {
           console.log('Could not find any acceptable host networks for bridging.');
@@ -793,6 +801,7 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
       await this.progressTracker.action(this.lastCommandComment, 10, async() => {
         await this.ensureRunLimaLocation(commands, explanations);
         await this.createLimaSudoersFile(commands, explanations, randomTag);
+        await this.installCustomLaunchdLimaNetworkConfig(commands, explanations);
       });
     }
     this.lastCommandComment = 'Setting up Docker socket';
@@ -993,6 +1002,105 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
     }
   }
 
+  protected async createPlistFiles(this: unknown, commands: Array<string>, explanations: Array<string>, mode: string, networkInterface: string): Promise<void> {
+    const limaPid = path.join(paths.lima, MACHINE_NAME, 'ha.pid');
+
+    // mode is either shared or bridged
+    const modeInterface = (mode === 'shared') ? mode : `${ mode }_${ networkInterface }`;
+    const vmnetArguments = (mode === 'shared') ? [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone', `--vmnet-mode=${ mode }`,
+      '--vmnet-gateway=192.168.205.1', '--vmnet-dhcp-end=192.168.205.254', '--vmnet-mask=255.255.255.0',
+      `--pidfile=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet_launchd.pid`,
+      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`] : [`${ VDE_DIR }/bin/vde_vmnet`, '--vde-group=everyone',
+      `--vmnet-mode=${ mode }`, `--vmnet-interface=${ networkInterface }`,
+      `--pidfile=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet_launchd.pid`,
+      `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`];
+
+    const vdeSwitchObjNew = {
+      Label:             `io.github.rancher-desktop.${ modeInterface }_switch`,
+      ProgramArguments:  [`${ VDE_DIR }/bin/vde_switch`, `--pidfile=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_switch_launchd.pid`,
+        `--sock=${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }.ctl`, '--group=everyone', '--dirmode=0777', '--nostdin'],
+      // StandardErrorPath: `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_switch.stderr`,
+      // StandardOutPath:   `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_switch.stdout`,
+      KeepAlive:         { PathState: { [limaPid]: true } },
+      UserName:          'daemon',
+      GroupName:         'everyone'
+    };
+
+    const vdeVmnetObjNew = {
+      Label:             `io.github.rancher-desktop.${ modeInterface }_vmnet`,
+      ProgramArguments:  vmnetArguments,
+      // StandardErrorPath: `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet.stderr`,
+      // StandardOutPath:   `${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_vmnet.stdout`,
+      KeepAlive:         { PathState: { [`${ RUN_LIMA_LOCATION }/rancher-desktop-${ modeInterface }_switch_launchd.pid`]: true } },
+      UserName:          'root',
+      GroupName:         'wheel'
+    };
+
+    const vdeSwitchFile = `${ LAUNCHD_DIR }/io.github.rancher-desktop.${ modeInterface }_switch.plist`;
+    const vdeVmnetFile = `${ LAUNCHD_DIR }/io.github.rancher-desktop.${ modeInterface }_vmnet.plist`;
+
+    let vdeSwitchObjCurrent: any;
+    let vdeVmnetObjCurrent: any;
+
+    try {
+      vdeSwitchObjCurrent = plist.parse(fs.readFileSync(vdeSwitchFile, 'utf8'));
+      vdeVmnetObjCurrent = plist.parse(fs.readFileSync(vdeVmnetFile, 'utf8'));
+    } catch (err) {
+    }
+
+    // Only use elevated permission when changes are required
+    if (!isEqual(JSON.stringify(vdeSwitchObjCurrent), JSON.stringify(vdeSwitchObjNew)) ||
+      !isEqual(JSON.stringify(vdeVmnetObjCurrent), JSON.stringify(vdeVmnetObjNew))) {
+      try {
+        // unload and stop running vmnet processes
+        // for bridged mode network interface might have changed, cleanup old configuration
+        if (mode === 'bridged') {
+          fs.readdirSync(LAUNCHD_DIR).forEach((file) => {
+            if (file.includes('io.github.rancher-desktop.bridged_')) {
+              commands.push(`launchctl unload ${ LAUNCHD_DIR }/${ file }`);
+            }
+          });
+          commands.push(`rm -rf ${ LAUNCHD_DIR }/io.github.rancher-desktop.${ mode }*`);
+          commands.push(`rm -rf ${ RUN_LIMA_LOCATION }/rancher-desktop-${ mode }*`);
+        } else {
+          commands.push(`launchctl unload ${ vdeSwitchFile }`);
+          commands.push(`launchctl unload ${ vdeVmnetFile }`);
+        }
+
+        const vdeSwitchTmpFile = path.join(os.tmpdir(), `io.github.rancher-desktop.${ modeInterface }_switch.plist`);
+        const vdeVmnetTmpFile = path.join(os.tmpdir(), `io.github.rancher-desktop.${ modeInterface }_vmnet.plist`);
+
+        await fs.promises.writeFile(vdeSwitchTmpFile, plist.build(vdeSwitchObjNew));
+        await fs.promises.writeFile(vdeVmnetTmpFile, plist.build(vdeVmnetObjNew));
+        console.log(`need to create new vmnet plist files for ${ modeInterface }`);
+        commands.push(`cp "${ vdeSwitchTmpFile }" ${ vdeSwitchFile } && rm -f "${ vdeSwitchTmpFile }"`);
+        commands.push(`cp "${ vdeVmnetTmpFile }" ${ vdeVmnetFile } && rm -f "${ vdeVmnetTmpFile }"`);
+        explanations.push(`launchd vmnet ${ modeInterface }`);
+
+        // load new configuration of vmnet processes
+        commands.push(`launchctl load ${ vdeSwitchFile }`);
+        commands.push(`launchctl load ${ vdeVmnetFile }`);
+      } catch (err) {
+        console.log(`Error writing vmnet plist files: ${ err }: `, err);
+      }
+    }
+  }
+
+  protected async installCustomLaunchdLimaNetworkConfig(this: Readonly<this> & this, commands: Array<string>, explanations: Array<string>): Promise<void> {
+    // Always add a shared network interface in case the bridged interface doesn't get an IP address.
+    await this.createPlistFiles(commands, explanations, 'shared', '');
+
+    const hostNetwork = (await this.getDarwinHostNetworks()).find((n) => {
+      return n.dhcp && n.IPv4?.Addresses?.some(addr => addr);
+    });
+
+    if (hostNetwork) {
+      await this.createPlistFiles(commands, explanations, 'bridged', hostNetwork.interface);
+    } else {
+      console.log('Could not find any acceptable host networks for bridging.');
+    }
+  }
+
   protected async ensureRunLimaLocation(this: unknown, commands: Array<string>, explanations: Array<string>): Promise<void> {
     const limaRunLocation: string = NETWORKS_CONFIG.paths.varRun;
     let dirInfo: fs.Stats | null;
@@ -1000,8 +1108,9 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
     try {
       dirInfo = await fs.promises.stat(limaRunLocation);
 
-      // If it's owned by root and not readable by others, it's fine
-      if (dirInfo.uid === 0 && (dirInfo.mode & fs.constants.S_IWOTH) === 0) {
+      // If it's owned by root and executable by others, it's fine
+      // This is needed for a regular user to access the vmswitch ctl directory.
+      if (dirInfo.uid === 0 && (dirInfo.mode & fs.constants.S_IXOTH) === 1) {
         return;
       }
     } catch (err) {
@@ -1013,10 +1122,9 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
     }
     if (!dirInfo) {
       commands.push(`mkdir -p ${ limaRunLocation }`);
-      commands.push(`chmod 755 ${ limaRunLocation }`);
     }
     commands.push(`chown -R root:daemon ${ limaRunLocation }`);
-    commands.push(`chmod -R o-w ${ limaRunLocation }`);
+    commands.push(`chmod 775 ${ limaRunLocation }`);
     explanations.push(limaRunLocation);
   }
 
